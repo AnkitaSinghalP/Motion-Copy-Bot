@@ -1,3 +1,5 @@
+//master.cpp
+
 #include "tasks.hpp"
 #include "examples/examples.hpp"
 #include "command_handler.hpp"
@@ -10,17 +12,12 @@
 #include "uart0_min.h"
 #include "eint.h"
 #include "event_groups.h"
-
 #include "i2c2.hpp"
 #include "i2c_base.hpp"
 
-//QueueHandle_t runQueue;
-
-void * task1;
-void * task2;
 int slaveAngle,masterAngle;
-char transmit = '0';
-
+int zAccData[3]={0};
+SemaphoreHandle_t dataRx;
 
 extern "C"
 {
@@ -28,15 +25,11 @@ extern "C"
 	{
 		int rotation_integer_received = int(LPC_UART3->RBR);
 		slaveAngle = (360 * (rotation_integer_received - 33)) / (255 - 33);
-		//printf("rotation_integer_received: %d\n",rotation_integer_received);
+		xSemaphoreGiveFromISR(dataRx,NULL);
+
 	}
 }
 
-void uart3_TransferByte(char out)
-{
-	LPC_UART3->THR = out;
-	while(!(LPC_UART3->LSR & (1<<5))); //wait until data is transmitted
-}
 
 class lsm303 : public scheduler_task
 {
@@ -49,6 +42,9 @@ class lsm303 : public scheduler_task
 
         bool init(void)
         {
+    		LPC_GPIO1->FIODIR &= ~(1<<9);
+
+
         	LPC_I2C2->I2MASK0 = 0x1F;
         	LPC_I2C2->I2CONSET = 0x40;
         	LPC_SC->PCONP |= (1<<25);
@@ -69,6 +65,7 @@ class lsm303 : public scheduler_task
 
         	return true;
         }
+
         void set_baud_rate(uint16_t req_baudrate)
         {
         	//Setting the Baud Rate 9600: Baud Rate = PCLK/16(DLM:DLL) = 48000000/16(9600)
@@ -90,198 +87,185 @@ class lsm303 : public scheduler_task
         	LPC_UART3->IER |= 1<<0;
         }
 
+        void uart3_TransferByte(char out)
+        {
+        	LPC_UART3->THR = out;
+        	while(!(LPC_UART3->LSR & (1<<5))); //wait until data is transmitted
+        }
+
+
+        //Function to determine the direction command for the Bot
+        char direction_command()
+        {
+
+        	int16_t checkMasterClockwise,checkMasterAntiClockwise;
+        	int8_t turningAngle = 25;
+        	int angleDifference;
+        	char steerCommand;
+        	uint8_t xMHiByte = 0, xMLoByte = 0, yMHiByte =0, yMLoByte=0,zMHiByte=0, zMLoByte=0;
+        	int16_t xMagData =0, yMagData =0, zMagData=0;
+        	float heading = 0.0;
+
+        	i2c.writeReg(0x3C,0x02,0x00);
+
+			xMHiByte = i2c.readReg(0x3D, 0x03);
+			xMLoByte = i2c.readReg(0x3D, 0x04);
+			yMHiByte = i2c.readReg(0x3D, 0x07);
+			yMLoByte = i2c.readReg(0x3D, 0x08);
+			zMHiByte = i2c.readReg(0x3D, 0x05);
+			zMLoByte = i2c.readReg(0x3D, 0x06);
+			xMagData = (xMHiByte << 8) | xMLoByte;
+			yMagData = (yMHiByte << 8) | yMLoByte;
+			zMagData = (zMHiByte << 8) | zMLoByte;
+			heading = (atan2(yMagData,xMagData)*180)/3.14159;
+
+			if(heading < 0)
+			{
+				heading = 360 + heading;
+			}
+
+			masterAngle = heading;
+
+          	angleDifference = masterAngle - slaveAngle;
+
+			if((abs(angleDifference) < turningAngle) || (abs(angleDifference) > (360 -turningAngle)))
+			{
+    			steerCommand = '5';		//Command Bot to move forward
+			}
+			else if(((angleDifference < 0) && (abs(angleDifference) < 180)) || ((angleDifference > 0) && (abs(angleDifference) > 180)))
+			{
+    			steerCommand = '4';		//Command Bot to steer Left
+			}
+			else if(((angleDifference < 0) && (abs(angleDifference) > 180)) || ((angleDifference > 0) && (abs(angleDifference) < 180)))
+			{
+    			steerCommand = '6';		//Command Bot to steer Right
+			}
+        	return steerCommand;
+        }
+
+
+        //Function to determine the stop or move command for the Bot
+        char motion_detect()
+        {
+        	static int numAccSample = 0;
+        	char botCommand;
+        	//Collect 3 consecutive data samples from accelerometer
+        	if(numAccSample<3)
+        	{
+        		zAccData[numAccSample] = AS.getZ();
+        	}
+        	else
+        	{
+        		numAccSample=0;                    //if number of samples =3, start storing from 0 again
+        		zAccData[numAccSample] = AS.getZ();
+
+        	}
+        	numAccSample++;
+        	//Compare the data sample values to determine user's movement
+        	if((abs(zAccData[0]-zAccData[1])<=100)&&(abs(zAccData[1]-zAccData[2])<=100))
+        	{
+        		botCommand = '2';                        //STOP
+        	}
+        	else
+        	{
+        		botCommand = direction_command();		//MOVE
+        	}
+        return botCommand;
+        }
 
         bool run(void *p)
         {
 
         	uint8_t slaveAddr = 0x1E;
+        	char transmit = '0';
         	LPC_I2C2->I2ADR0 = slaveAddr;
-        	//uint8_t txData=0;
-        	uint8_t xMHiByte = 0, xMLoByte = 0, yMHiByte =0, yMLoByte=0, zMHiByte=0, zMLoByte=0;
-        	uint8_t xAHiByte = 0, xALoByte = 0, yAHiByte =0, yALoByte=0, zAHiByte=0, zALoByte=0;
-        	int16_t xMagData =0, yMagData =0, zMagData=0, xAccData=0, yAccData=0, InbuiltAccX, InbuiltAccY, InbuiltAccZ;
-        	float heading = 0.0;
 
-        	i2c.writeReg(0x3C,0x02,0x00);
-        	xMHiByte = i2c.readReg(0x3D, 0x03);
-        	xMLoByte = i2c.readReg(0x3D, 0x04);
-        	yMHiByte = i2c.readReg(0x3D, 0x07);
-        	yMLoByte = i2c.readReg(0x3D, 0x08);
-        	zMHiByte = i2c.readReg(0x3D, 0x05);
-        	zMLoByte = i2c.readReg(0x3D, 0x06);
-        	xMagData = (xMHiByte << 8) | xMLoByte;
-        	yMagData = (yMHiByte << 8) | yMLoByte;
-        	zMagData = (zMHiByte << 8) | zMLoByte;
-        	heading = (atan2(yMagData,xMagData)*180)/3.14159;
-        	//char direction;
-        	if(heading < 0)
+        	if(xSemaphoreTake(dataRx,portMAX_DELAY))
         	{
-        		heading = 360 + heading;
+        		//Transmit Master motion and direction data to the Bot
+        		transmit = motion_detect();
+        		uart3_TransferByte(transmit);
         	}
-
-        	masterAngle = heading;
-
-        	//printf("masterAngle : %d\nslaveAngle : %d\n",masterAngle,slaveAngle);
-
-        	int checkMasterClockwise 	 = masterAngle + 25;
-        	int checkMasterAntiClockwise = masterAngle - 25;
-
-    		if(checkMasterClockwise >= 360)
-    			checkMasterClockwise -= 360;
-
-    		if(checkMasterAntiClockwise < 0)
-    			checkMasterAntiClockwise -= 0;
-
-
-    		for(int x = checkMasterAntiClockwise; x < checkMasterClockwise; x++)
-    		{
-    			if(x > 359)
-    				x = 0;
-
-    			if(x == slaveAngle)
-    			{
-    				//printf("middle\n");
-    				transmit = '5';
-    			}
-    		}
-
-        	for(int x = 0; x < 155; x++)
-        	{
-
-        		if(checkMasterClockwise == slaveAngle)
-        		{
-        			//printf("steer left\n");
-        			transmit = '4';
-        		}
-
-        		if(checkMasterAntiClockwise == slaveAngle)
-        		{
-        			//printf("steer right\n");
-        			transmit = '6';
-        		}
-
-        		checkMasterClockwise++;
-        		if(checkMasterClockwise >= 360)
-        			checkMasterClockwise=0;
-
-        		checkMasterAntiClockwise--;
-        		if(checkMasterAntiClockwise < 0)
-        			checkMasterAntiClockwise = 359;
-        	}
-        	uart3_TransferByte(transmit);
-
-    		vTaskDelay(100);
-
-        	if(AS.getY() < -550)
-        	{
-        		//printf("run\n");
-				uart3_TransferByte('8');
-        	}
-        	else if(AS.getY() > 550)
-        	{
-				uart3_TransferByte('3');
-        	}
-        	else
-        	{
-        		//printf("stop\n");
-				uart3_TransferByte('2');
-        	}
-
-        	vTaskDelay(100);
-
         	return true;
         }
 };
 
-void throttle(void *p)
-{
-	while(1)
-	{
-        	//printf("x : %d    y : %d    z : %d\n",AS.getX(),AS.getY(),AS.getZ());
-
-
-        	int acc1, acc2, speed1, speed2;
-
-        	acc1 = AS.getX()+AS.getY()+AS.getZ();
-        	vTaskDelay(50);
-        	acc2 = AS.getX()+AS.getY()+AS.getZ();
-        	speed1 = ((acc1 + acc2) / 2) /10;
-
-        	acc1 = AS.getX()+AS.getY()+AS.getZ();
-        	vTaskDelay(50);
-        	acc2 = AS.getX()+AS.getY()+AS.getZ();
-        	speed2 = ((acc1 + acc2) / 2) /10;
-
-        	if(abs(speed1 - speed2) > 5 )
-        	{
-        		transmit = '8';
-				printf("run\n");
-				uart3_TransferByte(transmit);
-        	}
-
-        	else
-        	{
-        		transmit = '2';
-				printf("stop\n");
-				uart3_TransferByte(transmit);
-        	}
-
-
-		vTaskDelay(100);
-	}
-}
-
 
 int main(void)
 {
-
+	vSemaphoreCreateBinary(dataRx);    //Create the binary semaphore
+	xSemaphoreTake(dataRx,0);
 	scheduler_add_task(new lsm303(PRIORITY_HIGH));
-	//xTaskCreate(throttle,(const char *)"throttle",STACK_BYTES(2048),0,PRIORITY_HIGH,0);
 
-    scheduler_add_task(new terminalTask(PRIORITY_HIGH));
+	/* Change "#if 0" to "#if 1" to run period tasks; @see period_callbacks.cpp */
+	#if 0
+		scheduler_add_task(new periodicSchedulerTask());
+	#endif
 
-    scheduler_add_task(new wirelessTask(PRIORITY_CRITICAL));
+	/* The task for the IR receiver */
+	// scheduler_add_task(new remoteTask  (PRIORITY_LOW));
 
-    #if 0
-    scheduler_add_task(new periodicSchedulerTask());
-    #endif
+	/* Your tasks should probably used PRIORITY_MEDIUM or PRIORITY_LOW because you want the terminal
+	 * task to always be responsive so you can poke around in case something goes wrong.
+	 */
 
-    #if 0
-        scheduler_add_task(new example_io_demo());
-    #endif
+	/**
+	 * This is a the board demonstration task that can be used to test the board.
+	 * This also shows you how to send a wireless packets to other boards.
+	 */
+	#if 0
+		scheduler_add_task(new example_io_demo());
+	#endif
 
+	/**
+	 * Change "#if 0" to "#if 1" to enable examples.
+	 * Try these examples one at a time.
+	 */
+	#if 0
+		scheduler_add_task(new example_task());
+		scheduler_add_task(new example_alarm());
+		scheduler_add_task(new example_logger_qset());
+		scheduler_add_task(new example_nv_vars());
+	#endif
 
-    #if 0
-        scheduler_add_task(new example_task());
-        scheduler_add_task(new example_alarm());
-        scheduler_add_task(new example_logger_qset());
-        scheduler_add_task(new example_nv_vars());
-    #endif
+	/**
+	 * Try the rx / tx tasks together to see how they queue data to each other.
+	 */
+	#if 0
+		scheduler_add_task(new queue_tx());
+		scheduler_add_task(new queue_rx());
+	#endif
 
-    #if 0
-        scheduler_add_task(new queue_tx());
-        scheduler_add_task(new queue_rx());
-    #endif
+	/**
+	 * Another example of shared handles and producer/consumer using a queue.
+	 * In this example, producer will produce as fast as the consumer can consume.
+	 */
+	#if 0
+		scheduler_add_task(new producer());
+		scheduler_add_task(new consumer());
+	#endif
 
-    #if 0
-        scheduler_add_task(new producer());
-        scheduler_add_task(new consumer());
-    #endif
+	/**
+	 * If you have RN-XV on your board, you can connect to Wifi using this task.
+	 * This does two things for us:
+	 *   1.  The task allows us to perform HTTP web requests (@see wifiTask)
+	 *   2.  Terminal task can accept commands from TCP/IP through Wifly module.
+	 *
+	 * To add terminal command channel, add this at terminal.cpp :: taskEntry() function:
+	 * @code
+	 *     // Assuming Wifly is on Uart3
+	 *     addCommandChannel(Uart3::getInstance(), false);
+	 * @endcode
+	 */
+	#if 0
+		Uart3 &u3 = Uart3::getInstance();
+		u3.init(WIFI_BAUD_RATE, WIFI_RXQ_SIZE, WIFI_TXQ_SIZE);
+		scheduler_add_task(new wifiTask(Uart3::getInstance(), PRIORITY_LOW));
+	#endif
 
-     #if 0
-        Uart3 &u3 = Uart3::getInstance();
-        u3.init(WIFI_BAUD_RATE, WIFI_RXQ_SIZE, WIFI_TXQ_SIZE);
-        scheduler_add_task(new wifiTask(Uart3::getInstance(), PRIORITY_LOW));
-    #endif
-
-    scheduler_start();
-    return -1;
+	scheduler_start(); ///< This shouldn't return
+	return -1;
 }
-
-
-
-
-
 
 
 
