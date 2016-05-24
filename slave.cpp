@@ -1,31 +1,11 @@
-/*
- *     SocialLedge.com - Copyright (C) 2013 
- *
- *     This file is part of free software framework for embedded processors.
- *     You can use it and/or distribute it as long as this copyright header
- *     remains unmodified.  The code is free for personal use and requires
- *     permission to use in a commercial product.
- *
- *      THIS SOFTWARE IS PROVIDED "AS IS".  NO WARRANTIES, WHETHER EXPRESS, IMPLIED
- *      OR STATUTORY, INCLUDING, BUT NOT LIMITED TO, IMPLIED WARRANTIES OF
- *      MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE APPLY TO THIS SOFTWARE.
- *      I SHALL NOT, IN ANY CIRCUMSTANCES, BE LIABLE FOR SPECIAL, INCIDENTAL, OR
- *      CONSEQUENTIAL DAMAGES, FOR ANY REASON WHATSOEVER.
- *
- *     You can reach the author of this software at :
- *          p r e e t . w i k i @ g m a i l . c o m
- */
+//slave.cpp
 
-/**
- * @file
- * @brief This is the application entry point.
- * 			FreeRTOS and stdio printf is pre-configured to use uart0_min.h before main() enters.
- * 			@see L0_LowLevel/lpc_sys.h if you wish to override printf/scanf functions.
- *
- */
+
 #include "tasks.hpp"
 #include "examples/examples.hpp"
+#include "command_handler.hpp"
 #include <stdio.h>
+#include <math.h>
 #include"LPC17xx.h"
 #include "utilities.h"
 #include "io.hpp"
@@ -33,14 +13,9 @@
 #include "uart0_min.h"
 #include "eint.h"
 #include "event_groups.h"
-#include "storage.hpp"
-#include <string.h>
-#include <ctime>
 #include "adc0.h"
-#include <iostream>
 #include "i2c2.hpp"
 #include "i2c_base.hpp"
-#include <math.h>
 
 using namespace std;
 
@@ -48,92 +23,17 @@ using namespace std;
 void * task1;
 void * task2;
 
-/**
- * The main() creates tasks or "threads".  See the documentation of scheduler_task class at scheduler_task.hpp
- * for details.  There is a very simple example towards the beginning of this class's declaration.
- *
- * @warning SPI #1 bus usage notes (interfaced to SD & Flash):
- *      - You can read/write files from multiple tasks because it automatically goes through SPI semaphore.
- *      - If you are going to use the SPI Bus in a FreeRTOS task, you need to use the API at L4_IO/fat/spi_sem.h
- *
- * @warning SPI #0 usage notes (Nordic wireless)
- *      - This bus is more tricky to use because if FreeRTOS is not running, the RIT interrupt may use the bus.
- *      - If FreeRTOS is running, then wireless task may use it.
- *        In either case, you should avoid using this bus or interfacing to external components because
- *        there is no semaphore configured for this bus and it should be used exclusively by nordic wireless.
- */
-
-
 struct botDriver
 {
 	char servo;
 	char dc;
 }motor;
 
+int speed = 100;
+float wheelAlignmentFactor = 0.45;
+
+bool ledGlow = false;
 bool obstacleDetected = false;
-
-
-class obstacleAvoider : public scheduler_task
-{
-public:
-	obstacleAvoider(uint8_t priority) : scheduler_task("obstacleAvoider",2000,priority){}
-	bool init(void)
-	{
-	    LPC_PINCON->PINSEL1 |= (1 << 20);
-		LPC_GPIO1->FIODIR |= (1<<20);
-
-		return true;
-	}
-	bool run(void *p)
-	{
-	    int adc3 = adc0_get_reading(3);
-
-			LPC_GPIO1 -> FIOSET = (1<<20);
-
-			printf("%d\n",adc3);
-			if(adc3 < 250)
-			{
-				obstacleDetected = true;
-
-	 			motor.dc &= ~(3<<0);//stop
-
-	 			vTaskDelay(1000);
-
-	 			motor.dc |= (2<<0);//front
-				motor.servo &= ~(3<<0);
-				motor.servo |= (1<<0);//left
-
-				vTaskDelay(500);
-	 			motor.dc &= ~(3<<0);//stop
-				motor.servo &= ~(3<<0);
-				vTaskDelay(500);
-
-	 			motor.dc |= (2<<0);//front
-				motor.servo &= ~(3<<0);
-				motor.servo |= (2<<0);//right
-
-				vTaskDelay(750);
-	 			motor.dc &= ~(3<<0);//stop
-				motor.servo &= ~(3<<0);
-				vTaskDelay(500);
-
-	 			motor.dc |= (2<<0);//front
-				motor.servo &= ~(3<<0);
-				motor.servo |= (1<<0);//left
-
-				vTaskDelay(400);
-				motor.servo &= ~(3<<0);
-				motor.dc &= ~(3<<0);
-
-				obstacleDetected = false;
-
-			}
-
-
-	    vTaskDelay(50);
- 		return true;
-	}
-};
 
 class dcDriveL298N : public scheduler_task
 {
@@ -148,25 +48,23 @@ public:
 	}
 	bool run(void *p)
 	{
-	    PWM dc(PWM::pwm2, 1000);
-		dc.set(100);
+	    PWM dc(PWM::pwm2, 1000); //enable PIN
+		dc.set(speed);
 
 		if((motor.dc & (1<<0)) && !(motor.dc & (1<<1))) //d0 = 1 and d1 = 0 //front
 		{
- 			LPC_GPIO1 -> FIOSET = (1<<19); // pwm
- 			LPC_GPIO1 -> FIOCLR = (1<<20); // dir
- 			//printf("front");
+ 			LPC_GPIO1 -> FIOSET = (1<<19); // input 1
+ 			LPC_GPIO1 -> FIOCLR = (1<<20); // input 2
 		}
 		if(!(motor.dc & (1<<0)) && (motor.dc & (1<<1))) //d0 = 0 and d1 = 1 //back
 		{
- 			LPC_GPIO1 -> FIOSET = (1<<20);// dir
- 			LPC_GPIO1 -> FIOCLR = (1<<19);// pwm
- 			//printf("back");
+ 			LPC_GPIO1 -> FIOCLR = (1<<19);// input 1
+			LPC_GPIO1 -> FIOSET = (1<<20);// input 2
 		}
 		if(!(motor.dc & (1<<0)) && !(motor.dc & (1<<1))) //d0 = 0 and d1 = 0 //stop
  		{
- 			LPC_GPIO1 -> FIOCLR = (1<<19); // pwm
- 			LPC_GPIO1 -> FIOCLR = (1<<20); // dir
+ 			LPC_GPIO1 -> FIOCLR = (1<<19); // input 1
+ 			LPC_GPIO1 -> FIOCLR = (1<<20); // input 2
  		}
 		vTaskDelay(100);
  		return true;
@@ -176,31 +74,26 @@ public:
 class servoDrive : public scheduler_task
 {
 public:
-	servoDrive(uint8_t priority) : scheduler_task("servoDrive",2000,priority)
-	{
-			//nothing
-	}
+	servoDrive(uint8_t priority) : scheduler_task("servoDrive",2000,priority){}
 	bool init(void)
 	{
-		//setRunDuration(100);
 	    return true;
 	}
 	bool run(void *p)
 	{
 		PWM servo(PWM::pwm1, 50);
 
-		//cout<<motor.servo<<"\n";
 		if(!(motor.servo & (1<<0)) && !(motor.servo & (1<<1))) //s0 = 0 and s1 = 0
-		{//printf("servo stop\n");
- 			servo.set(7.5);
+		{
+ 			servo.set(7.5 - wheelAlignmentFactor); //center wheel alignment
 		}
 		else if((motor.servo & (1<<0)) && !(motor.servo & (1<<1))) //s0 = 1 and s1 = 0
-		{//printf("leftp\n");
- 			servo.set(10.0);
+		{
+ 			servo.set(10.0); // left alignment
 		}
 		else if(!(motor.servo & (1<<0)) && (motor.servo & (1<<1))) //s0 = 0 and s1 = 1
-		{//printf("rightp\n");
- 			servo.set(5.0);
+		{
+ 			servo.set(5.0); //right alignment
 		}
 		vTaskDelay(100);
 		return true;
@@ -208,41 +101,9 @@ public:
 };
 
 
-
-
-void left()
-{
-		//motor.dc &= ~(3<<0);//stop
-		//motor.dc |= (2<<0);//front
-	motor.servo &= ~(3<<0);
-	motor.servo |= (1<<0);//left
-	//vTaskDelay(750);
-		//motor.dc &= ~(3<<0);//stop
-	//motor.servo &= ~(3<<0);
-}
-void right()
-{
-		//motor.dc &= ~(3<<0);//stop
-		//motor.dc |= (2<<0);//front
-	motor.servo &= ~(3<<0);
-	motor.servo |= (2<<0);//right
-	//vTaskDelay(750);
-		//motor.dc &= ~(3<<0);//stop
-	//motor.servo &= ~(3<<0);
-}
-void middle()
-{
-		//motor.dc &= ~(3<<0);//stop
-		//motor.dc |= (2<<0);//front
-	//motor.servo &= ~(3<<0);
-	//motor.servo |= (1<<0);//left
-	//vTaskDelay(1500);
-		//motor.dc &= ~(3<<0);//stop
-	motor.servo &= ~(3<<0);
-}
 void stop()
 {
-	motor.dc &= ~(3<<0);//stop
+	motor.dc &= ~(3<<0); //stop
 }
 void forward()
 {
@@ -254,6 +115,22 @@ void back()
 	motor.dc |= (1<<0);//back
 }
 
+void middle()
+{
+	motor.servo &= ~(3<<0);
+}
+
+void left()
+{
+	motor.servo &= ~(3<<0);
+	motor.servo |= (1<<0);//left
+}
+void right()
+{
+	motor.servo &= ~(3<<0);
+	motor.servo |= (2<<0);//right
+}
+
 enum direction: uint8_t{N,E,S,W};
 
 int16_t min_x = 0, max_x = 0, min_y = 0, max_y =0;
@@ -263,8 +140,6 @@ extern "C"
 	void UART3_IRQHandler(void)
 	{
 		rxData = LPC_UART3->RBR;
-		printf("receiver: %c\n",rxData);
-
 	}
 }
 
@@ -272,9 +147,7 @@ class i2cTask : public scheduler_task
 {
     public:
 	I2C2& i2c = I2C2::getInstance(); //Get I2C driver instance
-	i2cTask(uint8_t priority) : scheduler_task("i2cTask", 2000, priority)
-        {
-        }
+	i2cTask(uint8_t priority) : scheduler_task("i2cTask", 2000, priority){}
 
         bool init(void)
         {
@@ -354,215 +227,130 @@ class i2cTask : public scheduler_task
         	char rotation_character = char(((abs(heading) * (255-33)) / 360) + 33);
         	uart3_TransferByte(rotation_character);
 
-        	printf("slaveAngle : %d\n",abs(heading));
-
-        	if(rxData == '6')
-        		right();
-
-        	else if(rxData == '4')
-        		left();
-
-        	else if(rxData == '5')
-        		middle();
-
-        	else if(rxData == '8')
-        		forward();
-
-        	else if(rxData == '2')
-        		stop();
-
-        	else if(rxData == '3')
-        		back();
-
-/*
-
-        	if(heading <=225 && heading >=135)
+        	if(obstacleDetected == false) //no obstacle in path
         	{
-        		slave_dir = S;
-        	}
-        	else if(heading >=225 && heading <=315)
-        	{
-        		slave_dir = W;
-        	}
-        	else if(heading <=15 || heading >=315)
-        	{
-        		slave_dir = N;
-        	}
-        	else if(heading >=15 && heading <=135)
-        	{
-        		slave_dir = E;
-        	}
-        	//printf("Magnetometer: %02x    	%02x	   %02x\n",xMagData,yMagData,zMagData);
-        	//printf("Heading: %f       direction %c\n",heading,direction );
-        	//printf("Master's direction: %c\n",masterDir);
-        	uint8_t masterDir,masterMotion;
-        	int desiredDir;
-        	masterDir = (rxData>>4) & 0x0F;
-        	masterMotion = (rxData & 0x0F);
+				if(rxData == '6') // right
+				{
+					forward();
+					right();
+				}
 
+				else if(rxData == '4') //left
+				{
+					forward();
+					left();
+				}
 
-        	if (masterMotion == 0)
-        	{
-        		printf("\nStop\n");
-        		stop();
-        	}
+				else if(rxData == '5') //middle
+				{
+					forward();
+					middle();
+				}
 
-        	else if (masterMotion == 1)
-        	{
-        		printf("\nRun\n");
-        		forward();
-        		//vTaskDelay(1000);
-        		//stop();
+				else if(rxData == '8')
+				{
+					forward();
+				}
+
+				else if(rxData == '2')
+				{
+					stop();
+				}
+
+				else if(rxData == '3')
+				{
+					back();
+				}
 
         	}
-        	else if(masterMotion == 2)
-        	{
-        		printf("\nContinue\n");
-        		forward();
-        		//vTaskDelay(1000);
-        		//stop();
-        	}
-
-        	//printf("rxData: %d\n",rxData);
-
-        	printf("Slave's direction: %d\n",slave_dir);
-        	printf("Master's direction: %d\n",masterDir);
-
-        	desiredDir = slave_dir - masterDir;
-        	printf("desiredDir: %d\n",desiredDir);
-
-
-        	if(desiredDir == -1 || desiredDir == 3)
-        	{
-           		right();
-        		printf("right\n");
-        	}
-        	else if(desiredDir == 1 || desiredDir == -3)
-        	{
-        		printf("left\n");
-        		left();
-        	}
-        	else if(desiredDir == 0)
-        	{
-        		//forward();
-        		middle();
-        		printf("Forward\n");
-        	}
-        	else if(abs(desiredDir) == 2)
-        	{
-        		left();
-        		printf("u_turn\n");
-        	}
-
-
-*/
-
         	vTaskDelay(100);
         	return true;
         }
 };
 
 
-
-/*
-class pwmTest : public scheduler_task
+class obstacleAvoider : public scheduler_task
 {
 public:
-	pwmTest(uint8_t priority) : scheduler_task("pwmTest",2000,priority){}
+	obstacleAvoider(uint8_t priority) : scheduler_task("obstacleAvoider",2000,priority){}
 	bool init(void)
 	{
-		LPC_GPIO1->FIODIR |= (1<<20);//dir
-
-
-		LPC_GPIO1->FIODIR &= ~(1<<9);
-		LPC_GPIO1->FIODIR &= ~(1<<10);
-		LPC_GPIO1->FIODIR &= ~(1<<14);
- 		LPC_GPIO1->FIODIR &= ~(1<<15);
+		LPC_PINCON->PINSEL3 |= (3 << 28); // ADC-4
+		LPC_PINCON->PINSEL3 |= (3 << 30); // ADC-5
 
 		return true;
 	}
 	bool run(void *p)
 	{
-		PWM servo(PWM::pwm1, 50);
+	    int adc4 = adc0_get_reading(4);
+	    int adc5 = adc0_get_reading(5);
 
-		PWM dc(PWM::pwm2, 1000);
-
-		if(LPC_GPIO1 -> FIOPIN & (1<<9))
+		if(adc4 < 300 && adc5 < 300)
 		{
-			dc.set(50);
- 			LPC_GPIO1 -> FIOCLR = (1<<20); // dir
- 			printf("front");
-		}
-		else if(LPC_GPIO1 -> FIOPIN & (1<<10))
-		{
- 			LPC_GPIO1 -> FIOSET = (1<<20);// dir
- 			dc.set(50);
- 			printf("back");
-		}
-		else
- 		{
-			dc.set(100);
- 			LPC_GPIO1 -> FIOCLR = (1<<20); // dir
- 		}
-
-
-		if(LPC_GPIO1 -> FIOPIN & (1<<14))
-		{
- 			servo.set(5);
-		}
-		else if(LPC_GPIO1 -> FIOPIN & (1<<15))
-		{
- 			servo.set(10.0);
+			obstacleDetected = true;
+				stop();
 		}
 		else
 		{
- 			servo.set(7.5);
+			obstacleDetected = false;
 		}
 
-		vTaskDelay(100);
  		return true;
 	}
 };
-*/
+
+class led : public scheduler_task
+{
+public:
+	led(uint8_t priority) : scheduler_task("led",2000,priority){}
+	bool init(void)
+	{
+		LPC_PINCON->PINSEL0 &= ~(0xF<<0);
+		LPC_GPIO0 -> FIODIR |= ((1<<0)|(1<<1));
+
+
+		return true;
+	}
+	bool run(void *p)
+	{
+		if (obstacleDetected == true)
+		{
+			LPC_GPIO0->FIOCLR = (1<<0);
+		}
+
+		else
+		{
+
+			LPC_GPIO0->FIOSET = (1<<0);
+			if(ledGlow == true)
+			{
+				LPC_GPIO0->FIOCLR = (1<<1);
+
+			}
+			else
+			{
+				LPC_GPIO0->FIOSET = (1<<1);
+
+			}
+		}
+
+
+
+ 		return true;
+	}
+};
+
 
 
 
 
 int main(void)
 {
-	//scheduler_add_task(new dcDrive(PRIORITY_HIGH));
 	scheduler_add_task(new dcDriveL298N(PRIORITY_HIGH));
 	scheduler_add_task(new servoDrive(PRIORITY_HIGH));
 	scheduler_add_task(new i2cTask(PRIORITY_HIGH));
-	//scheduler_add_task(new uart_lab(PRIORITY_HIGH));
-	//scheduler_add_task(new switchController(PRIORITY_HIGH));
-	//scheduler_add_task(new xBeeReceiver(PRIORITY_HIGH));
-	//scheduler_add_task(new obstacleAvoider(PRIORITY_HIGH));
-
-//	vSemaphoreCreateBinary(mySemaphore);
-//	xSemaphoreTake(mySemaphore, 0);
-//	xTaskCreate(giveSemaphore,(const char *)"giveSemaphore",STACK_BYTES(2048),0,3,0);
-//	xTaskCreate(takeSemaphore,(const char *)"takeSemaphore",STACK_BYTES(2048),0,3,0);
-//
-
-//  scheduler_add_task(new gpioTask(PRIORITY_HIGH));
-//  scheduler_add_task(new uart_lab(PRIORITY_HIGH));
-//	scheduler_add_task(new pwm_self(PRIORITY_HIGH));
-
-//	dirQueue = xQueueCreate(1, sizeof(orientation_t));
-//	xTaskCreate(dirProducer,(const char *)"dirProducer",STACK_BYTES(2048),0,1,0);
-//	xTaskCreate(dirConsumer,(const char *)"dirConsumer",STACK_BYTES(2048),0,2,0);
-//
-
-
-/*	lightQueue = xQueueCreate(1, sizeof(int));
-	xEventGroup = xEventGroupCreate();
-	xTaskCreate(producer,(const char *)"producer",STACK_BYTES(2048),0,PRIORITY_MEDIUM,&task1);
-	xTaskCreate(consumer,(const char *)"consumer",STACK_BYTES(2048),0,PRIORITY_MEDIUM,&task2);
-	xTaskCreate(watchDog,(const char *)"watchDog",STACK_BYTES(2048),0,PRIORITY_HIGH,0);
-
-	xTaskCreate(cpu_usage,(const char *)"cpu_usage",STACK_BYTES(2048),0,PRIORITY_HIGH,0);*/
-
+	scheduler_add_task(new obstacleAvoider(PRIORITY_HIGH));
+	scheduler_add_task(new led(PRIORITY_HIGH));
 
     /**
      * A few basic tasks for this bare-bone system :
@@ -648,3 +436,5 @@ int main(void)
     scheduler_start(); ///< This shouldn't return
     return -1;
 }
+
+
